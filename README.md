@@ -32,7 +32,7 @@ This repository is used for experiments on data poisoning in healthcare datasets
 
 ## 5) GitHub + Colab workflow
 Use Colab for notebook edits and GitHub for branch/PR workflow:
-- Pull latest `dev`
+- Pull the latest changes from `dev`
 - Create/update your feature branch
 - Commit and push from Colab (or use **File → Save a copy in GitHub** for notebook commits)
 - Open PR to `dev`
@@ -51,6 +51,8 @@ Run these in a Colab cell (prefix with `!`):
 !git commit -m "feat: short description of change"
 !git push -u origin feature/<short-name>
 ```
+
+> **Note:** GitHub authentication from Google Colab may require a Personal Access Token (PAT) instead of your GitHub password when pushing changes.
 
 ## 7) Team collaboration guidelines
 - Keep active work in `dev`-based branches only
