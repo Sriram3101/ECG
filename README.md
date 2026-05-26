@@ -3,6 +3,12 @@
 ## 1) Project overview
 This repository is used for experiments on data poisoning in healthcare datasets, primarily through a Google Colab notebook.
 
+## Getting Started (quick steps)
+1. Clone this repository
+2. Check out the `dev` branch
+3. Open the notebook in Google Colab
+4. Create a feature branch before making changes
+
 ## 2) Repository structure
 - `main` branch
   - Contains only `README.md` and `.gitignore`
@@ -28,7 +34,7 @@ This repository is used for experiments on data poisoning in healthcare datasets
 Use Colab for notebook edits and GitHub for branch/PR workflow:
 - Pull latest `dev`
 - Create/update your feature branch
-- Commit and push from Colab
+- Commit and push from Colab (or use **File → Save a copy in GitHub** for notebook commits)
 - Open PR to `dev`
 
 ## 6) Colab Git commands (clone, commit, push)
@@ -51,6 +57,7 @@ Run these in a Colab cell (prefix with `!`):
 - Keep PRs small and focused
 - Review before merging
 - Do not push experimental work to `main`
+- Avoid editing the same notebook at the same time to reduce Jupyter/Colab merge conflicts
 - Resolve review comments before merge
 
 ## 8) Commit message guidelines
