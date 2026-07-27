@@ -1,7 +1,7 @@
 # Data-Poisoning-in-Healthcare
 
 ## 1) Project overview
-This repository is used for experiments on data poisoning in healthcare datasets, primarily through a Google Colab notebook.
+This repository is used for experiments on data poisoning in healthcare datasets, primarily through a Google Colab notebook. It also implements an agentic AI pipeline, where specialized agents collaboratively perform ECG validation, noise and poison detection, recovery, and reporting to improve the robustness of healthcare AI systems.
 
 ## Getting Started (quick steps)
 1. Clone this repository
