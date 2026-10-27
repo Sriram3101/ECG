@@ -1,0 +1,34 @@
+# agents/decision/config/thresholds.yaml
+#
+# Calibrate label_threshold / signal_threshold against a validation set
+# with simulated label- and signal-poisoning attacks (see evaluation/
+# evaluate_fusion.py). Pick the operating point on the ROC curve that
+# meets your target false-negative rate for the clinical use case —
+# don't just optimize for max F1.
+
+label_threshold: 0.55
+signal_threshold: 0.55
+
+# Width of the "not confidently clean, not confidently flagged" band,
+# measured below each threshold. 0 disables the UNCERTAIN verdict
+# entirely (every record is clean/label/signal/both). Start at 0 and
+# only turn this on once you have somewhere for UNCERTAIN records to
+# go (e.g. a manual review queue) — right now the Recovery agent routes
+# UNCERTAIN the same as a flagged verdict ("repair").
+uncertain_margin: 0.0
+
+# "weighted_mean" (default, most transparent) or "noisy_or" (lets one
+# strongly-suspicious signal check dominate rather than being averaged
+# down by three calm ones). See agents/decision/fusion.py docstring.
+fusion_strategy: weighted_mean
+
+# Per-check weights for fusing the four RAW signal-poisoning scores into
+# one signal_score. Must include exactly these four keys. Re-tune these
+# using evaluation/evaluate_fusion.py --sweep-weights once you have
+# enough attack-simulation data; the values below are a reasonable
+# starting point, not a calibrated result.
+signal_check_weights:
+  reconstruction_error: 0.30
+  feature_space_distance: 0.25
+  prediction_fragility: 0.20
+  gradient_sensitivity: 0.25
