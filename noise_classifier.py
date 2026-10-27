@@ -66,6 +66,38 @@ class TrainedNoiseClassifier:
         return {"score": score, "predicted_type": predicted_type}
 
 
+def split_distractor_for_training(sample_role: list[str] | np.ndarray, train_fraction: float = 0.7,
+                                   seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
+    """Relabels a `train_fraction` share of "distractor" rows as "clean" so
+    `train_noise_classifier` folds them in as explicit NEGATIVE ("not
+    attack") examples, alongside real clean beats -- never as positive. This
+    is different from leaving distractor out of training entirely: it
+    teaches the decision boundary to specifically exclude broadband sensor
+    noise, rather than just never encountering it and generalizing "any
+    large deviation = attack" (which real-data runs showed happens
+    otherwise -- see `evaluate_distractor_specificity`).
+
+    Returns (role_for_training, distractor_holdout_mask). Pass the first to
+    `train_noise_classifier`; pass the second as `restrict_to` to
+    `evaluate_distractor_specificity`, so specificity is measured only on
+    distractor beats the model never saw -- scoring against all "distractor"
+    rows here would be measuring the model on its own training data.
+    """
+    sample_role = np.asarray(sample_role, dtype=object)
+    role_for_training = sample_role.copy()
+    distractor_idx = np.flatnonzero(sample_role == "distractor")
+
+    rng = np.random.default_rng(seed)
+    shuffled = rng.permutation(distractor_idx)
+    n_train = int(len(shuffled) * train_fraction)
+    train_idx, holdout_idx = shuffled[:n_train], shuffled[n_train:]
+
+    role_for_training[train_idx] = "clean"  # explicit negative, never "attack"
+    holdout_mask = np.zeros(len(sample_role), dtype=bool)
+    holdout_mask[holdout_idx] = True
+    return role_for_training, holdout_mask
+
+
 def train_noise_classifier(feature_matrix: np.ndarray, sample_role: list[str] | np.ndarray,
                             threshold: float = 0.5, seed: int = 42) -> TrainedNoiseClassifier:
     """`feature_matrix` rows follow FEATURE_ORDER. `sample_role[i]` is one of
@@ -101,16 +133,24 @@ def train_noise_classifier(feature_matrix: np.ndarray, sample_role: list[str] | 
 
 
 def evaluate_distractor_specificity(classifier: TrainedNoiseClassifier, feature_matrix: np.ndarray,
-                                     sample_role: list[str] | np.ndarray) -> float:
+                                     sample_role: list[str] | np.ndarray,
+                                     restrict_to: np.ndarray | None = None) -> float:
     """Specificity check: what fraction of held-out NSTDB sensor-noise beats
     (never seen in training) does the detector wrongly flag as an attack?
 
     This is the number that actually tells you whether the detector learned
     "adversarial structure" versus just "signal looks unusual" -- run it
     every time you retrain, not just once. Lower is better.
+
+    If you used `split_distractor_for_training`, pass its `distractor_holdout_mask`
+    as `restrict_to` -- otherwise this scores against every "distractor" row,
+    including ones the model may have already trained on, which would
+    overstate specificity.
     """
     sample_role = np.asarray(sample_role, dtype=object)
     mask = sample_role == "distractor"
+    if restrict_to is not None:
+        mask = mask & np.asarray(restrict_to, dtype=bool)
     if not mask.any():
         print("[noise_classifier] no distractor rows found -- skipping specificity check.")
         return float("nan")
