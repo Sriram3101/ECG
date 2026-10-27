@@ -24,6 +24,11 @@ EXPECTED_BEAT_LENGTH = 360       # flattened length, used by 1-D checks/masks
 
 VALID_STATUSES = ("PASS", "REPAIR", "REJECT")
 
+# Class index -> label of the trained DenseNet1D+BiLSTM+Attention classifier
+# (scikit-learn's sorted LabelEncoder order; B = merged LBBB/RBBB).
+CLASS_LABELS = {0: "A", 1: "B", 2: "N", 3: "V"}
+NUM_CLASSES = len(CLASS_LABELS)
+
 
 # ---------------------------------------------------------------------------
 # Validation-specific types
@@ -91,13 +96,24 @@ class ECGState(TypedDict, total=False):
     # the Poison / Noise teams for their own harnesses)
     ground_truth: Optional[GroundTruth]
 
-    # reserved for downstream agents — added here as placeholders so the
-    # shape is documented in one place, even though Neha S does not populate
-    # these herself
-    poison: Optional[Dict[str, Any]]       # Agent 2 (Nishitha, Sravya)
-    noise: Optional[Dict[str, Any]]        # Agent 3 (Sriram, Nihar)
-    diagnosis: Optional[Dict[str, Any]]    # Diagnosis Model
-    decision: Optional[Dict[str, Any]]     # Decision Agent
+    # claimed annotation for the beat (model class index), if any — the
+    # label-poisoning agent checks whether this label can be trusted
+    label: Optional[int]
+
+    # populated by the downstream agents, in pipeline order (see
+    # orchestrator/pipeline.py for the routing between them)
+    label_poisoning: Optional[Any]         # DetectionReport — Label poisoning agent (Nishitha, Sravya)
+    signal_poisoning: Optional[Any]        # DetectionReport — Signal poisoning agent (Sriram, Nihar)
+    decision: Optional[Any]                # DecisionRecord (shared/contracts.py)
+    recovery: Optional[Any]                # RecoveryResult (shared/contracts.py)
+    diagnosis: Optional[Dict[str, Any]]    # Diagnosis agent
+    explainability: Optional[Dict[str, Any]]  # Explainability agent
+    report: Optional[Dict[str, Any]]       # Alert & reporting agent
+
+    # the signal/label Diagnosis should actually use: the validated signal,
+    # or the Recovery agent's repaired one. Shape (360,).
+    active_signal: Optional[np.ndarray]
+    active_label: Optional[int]
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +134,8 @@ def empty_validation_flags() -> ValidationFlags:
 
 
 def make_ecg_state(beat_id: str, raw_signal: np.ndarray,
-                    metadata: Optional[Dict[str, Any]] = None) -> ECGState:
+                    metadata: Optional[Dict[str, Any]] = None,
+                    label: Optional[int] = None) -> ECGState:
     """Construct a fresh ECGState for a beat entering the pipeline."""
     return ECGState(
         beat_id=beat_id,
@@ -126,8 +143,14 @@ def make_ecg_state(beat_id: str, raw_signal: np.ndarray,
         metadata=metadata or {},
         validation=None,
         ground_truth=None,
-        poison=None,
-        noise=None,
-        diagnosis=None,
+        label=label,
+        label_poisoning=None,
+        signal_poisoning=None,
         decision=None,
+        recovery=None,
+        diagnosis=None,
+        explainability=None,
+        report=None,
+        active_signal=None,
+        active_label=label,
     )

@@ -1,0 +1,14 @@
+numpy>=1.24
+scipy>=1.10
+pydantic>=2.0
+pyyaml>=6.0
+scikit-learn>=1.3
+joblib>=1.3
+PyWavelets>=1.4
+wfdb>=4.1
+langgraph>=0.2
+matplotlib>=3.7
+pytest>=7.4
+# model backends — install the one matching your checkpoint
+torch>=2.1          # models/densenet_bilstm.py, tests, synthetic demo
+# tensorflow>=2.15  # models.backend.KerasBackend for DenseNet1D_clean.keras

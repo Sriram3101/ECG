@@ -1,51 +1,45 @@
 # agents/diagnosis/diagnosis_agent.py
 """
-Diagnosis Agent — wraps the trained DenseNet1D + BiLSTM + Attention
-checkpoint and runs inference on a validated (and optionally recovered)
-ECG beat.
+Diagnosis Agent — runs the trained DenseNet1D + BiLSTM + Attention
+classifier on a validated (and, if needed, recovered) ECG beat.
 
-Input:  validation["signal"] from ECGState  (shape 360,1)
+The model is reached through models.backend (KerasBackend for the team's
+`DenseNet1D_clean.keras` checkpoint, TorchBackend for the PyTorch port), so
+this agent doesn't care which framework produced the weights.
+
+Input:  state["active_signal"] — the signal the orchestrator decided is
+        safe to diagnose (the Recovery agent's repaired signal if one was
+        produced, otherwise the validated signal). Falls back to
+        state["validation"]["signal"] when run outside the orchestrator.
 Output: fills ECGState["diagnosis"] with prediction, confidence, per-class probs
 """
 
 import numpy as np
-import torch
-from core.ecg_state import ECGState
 
-# Class index → human-readable label (MIT-BIH 5-class)
-CLASS_LABELS = {0: "A", 1: "B", 2: "N", 3: "V"}
-
-_model = None   # loaded lazily on first call
-
-def _load_model(checkpoint_path: str):
-    """Load the trained model once and cache it."""
-    global _model
-    if _model is not None:
-        return _model
-    # Import here to avoid circular imports at module load time
-    from models.densenet_bilstm import DenseNet1DBiLSTMAttention
-    _model = DenseNet1DBiLSTMAttention(num_classes=4)
-    state = torch.load(checkpoint_path, map_location="cpu")
-    _model.load_state_dict(state)
-    _model.eval()
-    return _model
+from core.ecg_state import CLASS_LABELS, ECGState
+from models.backend import ClassifierBackend
 
 
-def run_diagnosis(state: ECGState,
-                  checkpoint_path: str = "models/best_model.pth") -> ECGState:
+def _signal_for_diagnosis(state: ECGState):
+    signal = state.get("active_signal")
+    if signal is None:
+        signal = (state.get("validation") or {}).get("signal")
+    return signal
+
+
+def run_diagnosis(state: ECGState, backend: ClassifierBackend) -> ECGState:
     """
     Run the classifier on the validated/recovered signal.
 
-    Reads:  state["validation"]["signal"]
+    Reads:  state["active_signal"] (or state["validation"]["signal"])
     Writes: state["diagnosis"]
 
     Returns the updated ECGState.
     """
-    # Get signal — prefer repaired signal if available
-    signal = state.get("validation", {}).get("signal")
+    signal = _signal_for_diagnosis(state)
     if signal is None:
         state["diagnosis"] = {
-            "error": "No signal available — validation rejected this beat",
+            "error": "No signal available — beat was rejected or quarantined upstream",
             "predicted_class": None,
             "predicted_label": None,
             "confidence": None,
@@ -53,25 +47,15 @@ def run_diagnosis(state: ECGState,
         }
         return state
 
-    # Prepare tensor: (1, 1, 360) — batch=1, channel=1, length=360
-    arr = np.asarray(signal, dtype=np.float32).flatten()
-    x   = torch.tensor(arr).unsqueeze(0).unsqueeze(0)   # (1, 1, 360)
-
-    model = _load_model(checkpoint_path)
-
-    with torch.no_grad():
-        logits = model(x)                          # (1, num_classes)
-        probs  = torch.softmax(logits, dim=1)      # (1, num_classes)
-        pred   = int(probs.argmax(dim=1).item())
-        conf   = float(probs[0, pred].item())
+    probs = backend.predict_proba(np.asarray(signal, dtype=np.float32).flatten())[0]
+    pred = int(probs.argmax())
 
     state["diagnosis"] = {
         "predicted_class":      pred,
         "predicted_label":      CLASS_LABELS.get(pred, str(pred)),
-        "confidence":           round(conf, 4),
+        "confidence":           round(float(probs[pred]), 4),
         "class_probabilities":  {
-            CLASS_LABELS[i]: round(float(probs[0, i].item()), 4)
-            for i in range(probs.shape[1])
+            CLASS_LABELS.get(i, str(i)): round(float(p), 4) for i, p in enumerate(probs)
         },
         "error": None,
     }

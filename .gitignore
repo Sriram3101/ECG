@@ -21,3 +21,16 @@ data/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Model artifacts
+artifacts/*
+*.keras
+*.joblib
+.pytest_cache/
+
+# Keep the trained model, results and report; data splits stay local (>100MB)
+!artifacts/
+artifacts/*
+!artifacts/DenseNet1D_clean.keras
+!artifacts/results/
+!artifacts/report/

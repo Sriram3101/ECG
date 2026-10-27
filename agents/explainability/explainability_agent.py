@@ -1,99 +1,76 @@
 # agents/explainability/explainability_agent.py
 """
-Explainability Agent — generates attention maps and SHAP values
-for the diagnosis prediction.
+Explainability Agent — attention maps and SHAP values for the diagnosis
+prediction.
 
-Input:  state["diagnosis"] + state["validation"]["signal"]
-Output: fills state["explainability"] with attention weights and
-        feature importance scores
+Input:  state["diagnosis"] + the signal that was diagnosed
+        (state["active_signal"], falling back to state["validation"]["signal"])
+Output: fills state["explainability"] with
+          attention_weights     (360,) BiLSTM attention, resampled to input length
+          gradient_sensitivity  (360,) |d p(pred) / d x|, normalized to [0, 1]
+          shap_values           Shapley value of each 30-sample segment for
+                                the predicted class (sums to p(pred | beat) -
+                                p(pred | background beat))
+          top_regions           the 3 segments that pushed hardest toward
+                                the prediction
 """
 
 import numpy as np
-import torch
+
 from core.ecg_state import ECGState
+from models.backend import ClassifierBackend
 
-_model = None
-
-def _load_model(checkpoint_path: str):
-    global _model
-    if _model is not None:
-        return _model
-    from models.densenet_bilstm import DenseNet1DBiLSTMAttention
-    _model = DenseNet1DBiLSTMAttention(num_classes=4)
-    state = torch.load(checkpoint_path, map_location="cpu")
-    _model.load_state_dict(state)
-    _model.eval()
-    return _model
+FS = 360            # MIT-BIH sampling rate (Hz)
+SEGMENT = 30        # samples per explained segment
 
 
-def _get_attention_weights(model, x: torch.Tensor) -> np.ndarray:
+def _segment_shapley(backend: ClassifierBackend, signal: np.ndarray, background: np.ndarray,
+                     predicted_class: int, n_permutations: int = 64, seed: int = 0) -> np.ndarray:
+    """Permutation-sampling estimate of segment-level Shapley values.
+
+    Each 30-sample segment is a "player"; a coalition keeps its segments
+    from the beat and replaces the rest with the background beat (mean of
+    clean beats). Exact Shapley over 12 players needs 4096 forward passes;
+    sampling permutations gives an unbiased estimate at a fraction of that.
     """
-    Extract BiLSTM attention weights for the input beat.
-    Returns array of shape (360,) — one weight per timestep.
-    Weights sum to 1.0 (softmax output of attention layer).
+    n_segments = len(signal) // SEGMENT
+    rng = np.random.default_rng(seed)
+    orders = [rng.permutation(n_segments) for _ in range(n_permutations)]
+    batch = []
+    for order in orders:
+        current = background.copy()
+        batch.append(current.copy())
+        for seg in order:
+            current[seg * SEGMENT:(seg + 1) * SEGMENT] = signal[seg * SEGMENT:(seg + 1) * SEGMENT]
+            batch.append(current.copy())
+    # One forward pass for every coalition of every permutation.
+    probs = backend.predict_proba(np.stack(batch))[:, predicted_class].reshape(n_permutations, n_segments + 1)
+    contributions = np.zeros(n_segments)
+    for order, path in zip(orders, probs):
+        contributions[order] += np.diff(path)
+    return contributions / n_permutations
+
+
+def _segment_label(i: int) -> str:
+    start_ms = round(i * SEGMENT * 1000 / FS)
+    end_ms = round((i + 1) * SEGMENT * 1000 / FS)
+    return f"samples {i * SEGMENT}–{(i + 1) * SEGMENT} ({start_ms}–{end_ms} ms)"
+
+
+def run_explainability(state: ECGState, backend: ClassifierBackend,
+                       background: np.ndarray | None = None, n_permutations: int = 64) -> ECGState:
     """
-    attention_weights = []
+    Generate attention map, gradient saliency and segment SHAP values for
+    the diagnosis prediction.
 
-    def hook_fn(module, input, output):
-        # Attention layer returns (context, weights) — grab weights
-        if isinstance(output, tuple) and len(output) == 2:
-            attention_weights.append(output[1].detach().cpu().numpy())
-
-    # Register hook on the attention layer
-    hooks = []
-    for name, module in model.named_modules():
-        if "attention" in name.lower():
-            hooks.append(module.register_forward_hook(hook_fn))
-
-    with torch.no_grad():
-        model(x)
-
-    for h in hooks:
-        h.remove()
-
-    if attention_weights:
-        # Shape: (1, timesteps, 1) → flatten to (timesteps,)
-        weights = attention_weights[0].squeeze()
-        # Resize to 360 if needed (LSTM may compress sequence length)
-        if weights.shape[0] != 360:
-            weights = np.interp(
-                np.linspace(0, 1, 360),
-                np.linspace(0, 1, weights.shape[0]),
-                weights
-            )
-        return weights
-    else:
-        # Fallback: uniform weights if hook didn't fire
-        return np.ones(360) / 360
-
-
-def _get_gradient_sensitivity(model, x: torch.Tensor,
-                               predicted_class: int) -> np.ndarray:
+    `background` is the reference beat SHAP measures contributions against;
+    pass the mean of clean training beats. Defaults to a flat beat at the
+    signal's own mean.
     """
-    Compute input gradient sensitivity (saliency map).
-    High values = model is sensitive to that part of the signal.
-    Returns array of shape (360,).
-    """
-    x_grad = x.clone().requires_grad_(True)
-    logits = model(x_grad)
-    score  = logits[0, predicted_class]
-    score.backward()
-    saliency = x_grad.grad.abs().squeeze().numpy()  # (360,)
-    # Normalize to [0, 1]
-    saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-9)
-    return saliency
-
-
-def run_explainability(state: ECGState,
-                       checkpoint_path: str = "models/best_model.pth") -> ECGState:
-    """
-    Generate attention map and gradient saliency for the diagnosis prediction.
-
-    Reads:  state["validation"]["signal"], state["diagnosis"]
-    Writes: state["explainability"]
-    """
-    diagnosis = state.get("diagnosis", {})
-    signal    = state.get("validation", {}).get("signal")
+    diagnosis = state.get("diagnosis") or {}
+    signal = state.get("active_signal")
+    if signal is None:
+        signal = (state.get("validation") or {}).get("signal")
 
     # Guard: skip if diagnosis failed or beat was rejected
     if diagnosis.get("error") or signal is None or \
@@ -102,25 +79,38 @@ def run_explainability(state: ECGState,
             "error": "Skipped — no valid diagnosis to explain",
             "attention_weights": None,
             "gradient_sensitivity": None,
+            "shap_values": None,
             "top_regions": None,
         }
         return state
 
-    arr   = np.asarray(signal, dtype=np.float32).flatten()
-    x     = torch.tensor(arr).unsqueeze(0).unsqueeze(0)   # (1, 1, 360)
-    model = _load_model(checkpoint_path)
-    pred  = diagnosis["predicted_class"]
+    arr = np.asarray(signal, dtype=np.float32).flatten()
+    pred = int(diagnosis["predicted_class"])
+    if background is None:
+        background = np.full_like(arr, arr.mean())
+    background = np.asarray(background, dtype=np.float32).flatten()
 
-    attention   = _get_attention_weights(model, x)
-    sensitivity = _get_gradient_sensitivity(model, x, pred)
+    attention = backend.attention(arr)
+    attention = attention[0] if attention is not None else np.full(len(arr), 1.0 / len(arr))
 
-    # Top 3 most important 30-sample regions (based on attention)
-    region_scores = [
-        attention[i:i+30].mean()
-        for i in range(0, 360, 30)
-    ]
-    top_regions = sorted(
-        enumerate(region_scores), key=lambda x: -x[1]
-    )[:3]
-    top_regions = [
-        {"region": f"{i*30}–{i*30+30}ms", "importance":
+    saliency = np.abs(backend.input_gradient(arr, np.array([pred]))[0])
+    saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-9)
+
+    shap_values = _segment_shapley(backend, arr, background, pred, n_permutations)
+    top = np.argsort(-shap_values)[:3]
+
+    state["explainability"] = {
+        "attention_weights":    attention.round(6).tolist(),
+        "gradient_sensitivity": saliency.round(6).tolist(),
+        "shap_values":          shap_values.round(6).tolist(),
+        "top_regions": [
+            {"region": _segment_label(int(i)),
+             "shap": round(float(shap_values[i]), 4),
+             "attention": round(float(attention[i * SEGMENT:(i + 1) * SEGMENT].sum()), 4)}
+            for i in top
+        ],
+        "predicted_label": diagnosis.get("predicted_label"),
+        "confidence":      diagnosis.get("confidence"),
+        "error":           None,
+    }
+    return state

@@ -209,7 +209,7 @@ def repair_clipping(signal) -> np.ndarray:
     return _restore_shape(flat, original_shape)
 
 
-def repair_amplitude(signal) -> np.ndarray:
+def repair_amplitude(signal, z_thresh: float = _Z_THRESH) -> np.ndarray:
     """Clamp amplitude outliers to +/- 6 standard deviations.
 
     Computes a z-score for every sample relative to the signal's own
@@ -237,11 +237,11 @@ def repair_amplitude(signal) -> np.ndarray:
 
     z = (flat - mu) / sigma
 
-    upper_bound = mu + _Z_THRESH * sigma
-    lower_bound = mu - _Z_THRESH * sigma
+    upper_bound = mu + z_thresh * sigma
+    lower_bound = mu - z_thresh * sigma
 
-    high_outliers = z > _Z_THRESH
-    low_outliers = z < -_Z_THRESH
+    high_outliers = z > z_thresh
+    low_outliers = z < -z_thresh
 
     flat[high_outliers] = upper_bound
     flat[low_outliers] = lower_bound
@@ -249,7 +249,7 @@ def repair_amplitude(signal) -> np.ndarray:
     return _restore_shape(flat, original_shape)
 
 
-def repair_signal(signal, flags: Dict) -> Tuple[np.ndarray, List[str]]:
+def repair_signal(signal, flags: Dict, amplitude_z_thresh: float = _Z_THRESH) -> Tuple[np.ndarray, List[str]]:
     """Apply the repairs indicated by ``flags`` to a copy of ``signal``.
 
     This is the single entry point ``validation_agent.py`` should call
@@ -293,7 +293,7 @@ def repair_signal(signal, flags: Dict) -> Tuple[np.ndarray, List[str]]:
         actions.append('clip_smoothed')
 
     if flags.get('abnormal_amplitude'):
-        working = repair_amplitude(working)
+        working = repair_amplitude(working, amplitude_z_thresh)
         actions.append('amplitude_clamped')
 
     return working, actions

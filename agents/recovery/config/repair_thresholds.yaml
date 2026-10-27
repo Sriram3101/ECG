@@ -1,0 +1,26 @@
+# agents/recovery/config/repair_thresholds.yaml
+#
+# Calibrate both values against a validation set with simulated attacks
+# (see evaluation/evaluate_recovery.py). The right operating point trades
+# off "repairs and forwards more records automatically" against "sends
+# more to manual review" — err toward quarantining when unsure, since a
+# bad automatic repair silently corrupts whatever the Diagnosis agent
+# does next.
+
+# Below this consensus confidence, a LABEL_POISONED record is quarantined
+# instead of relabeled automatically.
+min_label_confidence: 0.7
+
+# Below this reconstruction_confidence (how in-distribution/typical the
+# autoencoder's reconstruction is relative to clean training data — NOT
+# a distance from the original poisoned signal, which is *expected* to
+# be large), a SIGNAL_POISONED record is quarantined instead of having
+# its signal replaced automatically.
+min_signal_confidence: 0.6
+
+# What happens to a SIGNAL_POISONED record whose reconstruction is below
+# min_signal_confidence: "denoise" applies Butterworth (0.5-40 Hz) + wavelet
+# filtering instead (strategies/denoise.py) — the orchestrator re-runs
+# signal poisoning detection on the result and sends it to expert review if
+# it is still flagged. "quarantine" sends it straight to review.
+signal_repair_fallback: denoise

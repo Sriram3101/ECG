@@ -30,6 +30,7 @@ Workflow:
                         not clean -> ValidationResult(status="REJECT")
 """
 
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -56,8 +57,31 @@ from core.ecg_state import (
     empty_validation_flags,
 )
 
+EXPECTED_SAMPLING_RATE = 360  # Hz, MIT-BIH
 
-def _run_checks(signal) -> Tuple[ValidationFlags, float, bool]:
+
+@dataclass(frozen=True)
+class ValidationConfig:
+    """Thresholds that depend on how beats are scaled.
+
+    The defaults are the original ones, written for raw (mV / min-max)
+    beats. The pipeline's beats are z-scored per beat (mean 0, std 1), where
+    a normal R-peak sits at 5-8: with the defaults ~60% of genuine MIT-BIH
+    beats fail the +/-5 range check, and R-peaks above 6 would be clamped
+    as "abnormal amplitude". Use `ValidationConfig.zscored_beats()` there.
+    """
+    valid_range: Tuple[float, float] = (-5.0, 5.0)
+    amplitude_z_thresh: float = 6.0
+    flatline_std: float = 0.01
+    clip_run_length: int = 3
+
+    @classmethod
+    def zscored_beats(cls) -> "ValidationConfig":
+        # Largest |z| in the 69,802-beat training split is 8.32 (99.9th pct 7.93).
+        return cls(valid_range=(-12.0, 12.0), amplitude_z_thresh=10.0)
+
+
+def _run_checks(signal, config: ValidationConfig = ValidationConfig()) -> Tuple[ValidationFlags, float, bool]:
     """Run all format and sanity checks on ``signal``.
 
     Executes every check from format_checks.py and sanity_checks.py,
@@ -93,16 +117,16 @@ def _run_checks(signal) -> Tuple[ValidationFlags, float, bool]:
 
     # check_invalid_entries() is always executed, but its result is kept
     # separate from ValidationFlags (no such field exists on it).
-    invalid_entries_ok, _ = check_invalid_entries(signal)
+    invalid_entries_ok, _ = check_invalid_entries(signal, config.valid_range)
 
     # --- sanity checks -------------------------------------------------
-    flatline_ok, _ = check_flatline(signal)
+    flatline_ok, _ = check_flatline(signal, config.flatline_std)
     flags["flatline"] = not flatline_ok
 
-    clipping_ok, _ = check_clipping(signal)
+    clipping_ok, _ = check_clipping(signal, config.clip_run_length)
     flags["clipping"] = not clipping_ok
 
-    amplitude_ok, _ = check_amplitude(signal)
+    amplitude_ok, _ = check_amplitude(signal, config.amplitude_z_thresh)
     flags["abnormal_amplitude"] = not amplitude_ok
 
     # --- NaN ratio -------------------------------------------------------
@@ -113,7 +137,8 @@ def _run_checks(signal) -> Tuple[ValidationFlags, float, bool]:
     return flags, nan_ratio, invalid_entries_ok
 
 
-def validate_beat(signal, metadata: Optional[Dict[str, Any]] = None) -> ValidationResult:
+def validate_beat(signal, metadata: Optional[Dict[str, Any]] = None,
+                  config: Optional[ValidationConfig] = None) -> ValidationResult:
     """Validate (and, if needed, repair) a single ECG beat.
 
     This is the single public entry point of the validation agent. It
@@ -126,7 +151,9 @@ def validate_beat(signal, metadata: Optional[Dict[str, Any]] = None) -> Validati
         metadata: Optional beat metadata (record id, lead, sampling rate,
             etc.), accepted for interface compatibility with the rest of
             the ECGState pipeline. ValidationResult has no metadata field,
-            so it is not used by the validation logic itself.
+            except for a stated sampling rate ("fs" or "sampling_rate"),
+            which must be 360 Hz.
+        config: Scaling-dependent thresholds; see ValidationConfig.
 
     Returns:
         A ValidationResult dict describing the final outcome:
@@ -137,11 +164,19 @@ def validate_beat(signal, metadata: Optional[Dict[str, Any]] = None) -> Validati
             - status="REPAIR": signal was repaired and the repaired
               version passed re-validation cleanly.
     """
-    # `metadata` is accepted for interface symmetry with the pipeline but
-    # is not consumed here -- ValidationResult carries no metadata field.
-    del metadata
+    config = config or ValidationConfig()
+    flags, nan_ratio, invalid_entries_ok = _run_checks(signal, config)
 
-    flags, nan_ratio, invalid_entries_ok = _run_checks(signal)
+    fs = (metadata or {}).get("fs", (metadata or {}).get("sampling_rate"))
+    if fs is not None and float(fs) != EXPECTED_SAMPLING_RATE:
+        result: ValidationResult = {
+          "status": "REJECT",
+          "signal": None,
+          "flags": flags,
+          "reason": f"sampling rate {fs} Hz, expected {EXPECTED_SAMPLING_RATE} Hz",
+          "repair_actions": [],
+        }
+        return result
 
     # check_invalid_entries() failures are treated as a structural
     # validation failure and short-circuit straight to REJECT, without
@@ -180,10 +215,10 @@ def validate_beat(signal, metadata: Optional[Dict[str, Any]] = None) -> Validati
 
     # decision == "REPAIR": repair the signal, then rerun the entire
     # validation pipeline from scratch on the repaired result.
-    repaired_signal, repair_actions = repair_signal(signal, flags)
+    repaired_signal, repair_actions = repair_signal(signal, flags, config.amplitude_z_thresh)
 
     post_repair_flags, post_repair_nan_ratio, post_repair_invalid_ok = _run_checks(
-        repaired_signal
+        repaired_signal, config
     )
 
     if not post_repair_invalid_ok:
